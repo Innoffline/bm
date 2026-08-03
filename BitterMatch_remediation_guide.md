@@ -16,10 +16,28 @@ Copy and paste target for items 1 to 6 of the audit. Everything here was tested 
 | `bm_predict.py` | scores one query set, labelled or not, writes the table and the figure |
 | `bm_repeated_eval.py` | the dispersion estimate item 2 requires, plus a label permutation control |
 
+PowerShell, which is what the internal machine runs:
+
+```powershell
+python bm_train.py                                          # once
+
+$env:BM_CONFIG = "bm_config_nba"; python bm_predict.py      # 14 compound set
+$env:BM_CONFIG = "bm_config_nbb"; python bm_predict.py      # 20 compound set
+
+$env:BM_CONFIG = "bm_config"
+Start-Process -NoNewWindow -FilePath python `
+    -ArgumentList "-u", "bm_repeated_eval.py" `
+    -RedirectStandardOutput "repeated_eval.log" `
+    -RedirectStandardError  "repeated_eval.err"
+Get-Content repeated_eval.log -Wait
+```
+
+`$env:BM_CONFIG` persists for the rest of the session once set, so clear it with `Remove-Item Env:BM_CONFIG` afterwards or set it again before every run. The equivalent on a shell that uses `VAR=value command` syntax:
+
 ```bash
-python bm_train.py                              # once
-BM_CONFIG=bm_config_nba python bm_predict.py    # 14 compound set
-BM_CONFIG=bm_config_nbb python bm_predict.py    # 20 compound set
+python bm_train.py
+BM_CONFIG=bm_config_nba python bm_predict.py
+BM_CONFIG=bm_config_nbb python bm_predict.py
 nohup python -u bm_repeated_eval.py > repeated_eval.log 2>&1 &
 ```
 

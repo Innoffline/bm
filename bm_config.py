@@ -2,14 +2,22 @@
 
 All three scripts read their settings from here, so this is the only file you
 need to edit. To keep more than one query set configured at a time, copy this
-file (bm_config_nba.py, bm_config_nbb.py) and select one at run time:
+file (bm_config_nba.py, bm_config_nbb.py) and select one at run time.
 
+PowerShell:
+    $env:BM_CONFIG = "bm_config_nba"; python bm_predict.py
+
+bash:
     BM_CONFIG=bm_config_nba python bm_predict.py
+
+Note for PowerShell: $env:BM_CONFIG stays set for the rest of the session, so
+clear it with Remove-Item Env:BM_CONFIG when you are done, or set it again
+before each run.
 
 Run order:
     1. python bm_train.py           # fits the model, calibrates, writes artefacts
     2. python bm_predict.py         # scores a query set, once per config
-    3. python bm_repeated_eval.py   # dispersion estimate, slow, optional but expected
+    3. python bm_repeated_eval.py   # dispersion estimate, slow, expected in reports
 """
 
 # --------------------------------------------------------------------------
@@ -63,3 +71,9 @@ N_REPEATS = 20             # item 2, repeats in bm_repeated_eval.py
 # These are turned into absolute values in bm_train.py and then frozen.
 COVERAGE_Q_LOW = 0.25
 COVERAGE_Q_HIGH = 0.60
+
+# Print the value inside every heatmap cell.
+#   'auto'  numbers when the grid is 700 cells or smaller, colour only beyond
+#   True    always, useful when you intend to read exact values off the figure
+#   False   never, the CSV remains the place to read exact values
+ANNOTATE_CELLS = 'auto'

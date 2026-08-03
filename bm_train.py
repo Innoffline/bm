@@ -2,6 +2,10 @@
 
 Audit items 1, 3, 4, 5 and the training half of item 6.
 
+PowerShell:
+    $env:BM_CONFIG = "bm_config"; python bm_train.py
+
+bash:
     BM_CONFIG=bm_config python bm_train.py
 
 Writes into MODEL_DIR:

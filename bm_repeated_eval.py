@@ -6,9 +6,21 @@ changes worth arguing about, so a single run cannot tell you whether something
 helped.
 
 Slow by design. Each repeat rebuilds the neighbourhood features once per inner
-fold plus once for the final fit. Run it detached:
+fold plus once for the final fit. Run it detached.
 
+PowerShell:
+    $env:BM_CONFIG = "bm_config"
+    Start-Process -NoNewWindow -FilePath python `
+        -ArgumentList "-u", "bm_repeated_eval.py" `
+        -RedirectStandardOutput "repeated_eval.log" `
+        -RedirectStandardError  "repeated_eval.err"
+    Get-Content repeated_eval.log -Wait        # follow the progress
+
+bash:
     BM_CONFIG=bm_config nohup python -u bm_repeated_eval.py > repeated_eval.log 2>&1 &
+
+Set N_REPEATS to 2 in the config for a first run to confirm it completes before
+letting it loose on the full twenty.
 
 Writes into OUT_DIR:
     repeated_evaluation.csv          one row per repeat
@@ -65,4 +77,6 @@ print('A change smaller than about %.3f has not been demonstrated to do '
 if PERMUTE:
     print('Base rate was %.3f. Permuted AP should be close to it.' % res.base_rate.mean())
 else:
-    print('Run the negative control too: BM_PERMUTE=1 python bm_repeated_eval.py')
+    print('Run the negative control too.')
+    print('  PowerShell: $env:BM_PERMUTE = "1"; python bm_repeated_eval.py')
+    print('  bash:       BM_PERMUTE=1 python bm_repeated_eval.py')

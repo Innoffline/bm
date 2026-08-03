@@ -5,6 +5,11 @@ Audit items 1 and 6 on the inference side, plus the two panel figure.
 Works whether the query compounds carry associations, carry some, or carry
 none. Set QUERY_ASSOC_CSV to None in the config for a set with no labels.
 
+PowerShell:
+    $env:BM_CONFIG = "bm_config_nba"; python bm_predict.py
+    $env:BM_CONFIG = "bm_config_nbb"; python bm_predict.py
+
+bash:
     BM_CONFIG=bm_config_nba python bm_predict.py
     BM_CONFIG=bm_config_nbb python bm_predict.py
 
@@ -208,30 +213,59 @@ tier_of = {rev_name_dict.get(i, i): str(tiers[i]) for i in cov.index}
 ylabels = ['%s  [%s]' % (n, tier_of[n]) for n in panel_a.index]
 
 INK, MUTED, SURFACE = '#1f2328', '#6b7280', '#ffffff'
-h = max(3.2, 0.30 * len(panel_a) + 1.9)
-fig, axes = plt.subplots(1, 2, figsize=(15, h), constrained_layout=True)
+n_rows, n_cols = panel_a.shape
+
+# Cell values are readable up to a few hundred cells and turn into noise beyond
+# that, so 'auto' keeps them while the grid stays legible. Set ANNOTATE_CELLS
+# to True or False in the config to override.
+annotate = getattr(cfg, 'ANNOTATE_CELLS', 'auto')
+if annotate == 'auto':
+    annotate = n_rows * n_cols <= 700
+
+panel_w = max(6.0, 0.34 * n_cols + 2.6)
+fig_w = 2 * panel_w + 1.4
+h = max(3.4, 0.34 * n_rows + 2.0)
+fig, axes = plt.subplots(1, 2, figsize=(fig_w, h), constrained_layout=True)
+
+# Roughly how many points of width each cell gets, which sets the label size.
+cell_pt = (panel_w * 0.80 / max(n_cols, 1)) * 72
+fontsize = float(np.clip(cell_pt / 3.4, 3.6, 8.0))
 
 lim = float(np.nanmax(np.abs(panel_b.values))) or 1.0
-specs = [(panel_a, 'Blues', dict(vmin=0, vmax=1),
+specs = [(panel_a, 'Blues', dict(vmin=0, vmax=1), lambda v: ('%.2f' % v).lstrip('0'),
           'Calibrated probability', 'what to prioritise for testing'),
          (panel_b, 'RdBu_r', dict(vmin=-lim, vmax=lim),
+          lambda v: '0.0' if abs(v) < 0.05 else '%+.1f' % v,
           'Evidence beyond the receptor prior', 'what is unusual about this molecule')]
 
-for ax, (panel, cmap, norm, title, sub) in zip(axes, specs):
+for ax, (panel, cmap, norm, fmt, title, sub) in zip(axes, specs):
     im = ax.imshow(panel.values, aspect='auto', cmap=cmap, **norm)
     ax.set_title('%s\n%s' % (title, sub), fontsize=10, color=INK, pad=8, loc='left')
-    ax.set_xticks(range(panel.shape[1]))
+    ax.set_xticks(range(n_cols))
     ax.set_xticklabels(panel.columns, rotation=90, fontsize=7, color=MUTED)
     ax.set_xlabel('TAS2R', fontsize=8, color=MUTED, labelpad=4)
-    ax.set_yticks(range(panel.shape[0]))
+    ax.set_yticks(range(n_rows))
     ax.set_yticklabels(ylabels, fontsize=7, color=MUTED)
     # A surface gap between cells rather than a border drawn around them.
-    ax.set_xticks(np.arange(-.5, panel.shape[1], 1), minor=True)
-    ax.set_yticks(np.arange(-.5, panel.shape[0], 1), minor=True)
+    ax.set_xticks(np.arange(-.5, n_cols, 1), minor=True)
+    ax.set_yticks(np.arange(-.5, n_rows, 1), minor=True)
     ax.grid(which='minor', color=SURFACE, linewidth=1.4)
     ax.tick_params(which='both', length=0)
     for s in ax.spines.values():
         s.set_visible(False)
+
+    if annotate:
+        vals = panel.values
+        for i in range(n_rows):
+            for j in range(n_cols):
+                v = vals[i, j]
+                if not np.isfinite(v):
+                    continue
+                r, g, b, _a = im.cmap(im.norm(v))
+                lum = 0.299 * r + 0.587 * g + 0.114 * b
+                ax.text(j, i, fmt(v), ha='center', va='center', fontsize=fontsize,
+                        color='#ffffff' if lum < 0.55 else INK)
+
     cb = fig.colorbar(im, ax=ax, fraction=0.030, pad=0.02)
     cb.ax.tick_params(labelsize=7, length=0, colors=MUTED)
     cb.outline.set_visible(False)

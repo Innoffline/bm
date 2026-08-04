@@ -14,8 +14,9 @@ bash:
     BM_CONFIG=bm_config_nbb python bm_predict.py
 
 Writes into OUT_DIR:
-    <QUERY_NAME>_predictions.csv     one row per pair, the table view
-    <QUERY_NAME>_heatmap.png         two panels, probability and lift
+    <QUERY_NAME>_predictions.csv          one row per pair, the table view
+    <QUERY_NAME>_heatmap_probability.png  calibrated probability
+    <QUERY_NAME>_heatmap_lift.png         evidence beyond the receptor prior
 """
 import json
 import os
@@ -28,12 +29,13 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from sklearn.metrics import average_precision_score, precision_score, recall_score
 
-from bittermatch_ext import (get_config, load_training_inputs, load_query_inputs,
+from bittermatch_ext import (get_config, PREDICT_CONFIG, load_training_inputs,
+                             load_query_inputs,
                              build_base, build_features, long_form,
                              coverage_per_ligand, assign_tier, nearest_neighbours,
-                             lift_over_prior, wilson, ID_COLS)
+                             lift_over_prior, wilson, duplicate_report, ID_COLS)
 
-cfg = get_config()
+cfg = get_config(PREDICT_CONFIG)
 os.makedirs(cfg.OUT_DIR, exist_ok=True)
 
 print('=' * 74)
@@ -65,7 +67,7 @@ A_full = pd.concat([A, pd.DataFrame(np.nan, index=new_A.index, columns=new_A.col
 
 # The combined matrices cover training and query compounds together. Restrict
 # them to the rows the design matrix will actually use.
-sim_dict = {k: (S.iloc[np.isin(S.index, A_full.index), np.isin(S.columns, A_full.index)], 0)
+sim_dict = {k: S.iloc[np.isin(S.index, A_full.index), np.isin(S.columns, A_full.index)]
             for k, S in sim_dict.items()}
 
 X_Lig_all = pd.concat([X_Lig, q_X_Lig], ignore_index=True)
@@ -87,6 +89,29 @@ assert len(results) == expected, (
     % (expected, len(query_ids), n_human, len(results)))
 print('%d compounds x %d human receptors = %d pairs to score'
       % (len(query_ids), n_human, expected))
+
+print('\n' + '=' * 74)
+print('2b. duplicate screen, InChIKey skeleton match against the training set')
+print('=' * 74)
+train_smiles = pd.read_csv(cfg.LIG_FEAT_CSV)[['cid', 'SMILES']].drop_duplicates('cid')
+train_smiles = train_smiles[train_smiles.cid.isin(A.index)].set_index('cid').SMILES.to_dict()
+query_smiles = pd.read_csv(cfg.QUERY_LIG_FEAT_CSV)[['cid', 'SMILES']].drop_duplicates('cid')
+query_smiles = {name_dict[k]: v for k, v in query_smiles.set_index('cid').SMILES.to_dict().items()}
+
+dup, dup_meta = duplicate_report(query_smiles, train_smiles)
+if dup_meta['multicomponent']:
+    print('NOTE: multi component SMILES present, a salt will not match its free '
+          'form on the skeleton block: %s' % dup_meta['multicomponent'])
+if len(dup):
+    dup['query'] = dup['query'].map(rev_name_dict)
+    print(dup.to_string(index=False))
+    raise SystemExit(
+        '\n%d of %d query compounds already exist in the training set. Any figure '
+        'computed on them is circular. Drop them from the query set, or retrain '
+        'without them, then run this again.'
+        % (dup_meta['n_flagged'], dup_meta['n_query']))
+print('none of the %d query compounds matches a training compound'
+      % dup_meta['n_query'])
 
 print('\n' + '=' * 74)
 print('3. scoring')
@@ -120,13 +145,17 @@ tiers = assign_tier(cov, T_LOW, T_HIGH)
 results['coverage'] = results.ligand.map(cov)
 results['tier'] = results.ligand.map(tiers).astype(str)
 
-tbl = pd.DataFrame({'compound': [rev_name_dict.get(i, i) for i in cov.index],
-                    'coverage': cov.round(3).values,
-                    'tier': tiers.astype(str).values}).sort_values('coverage')
-print(tbl.to_string(index=False))
-counts = tbl.tier.value_counts().to_dict()
+# One per compound frame, used for this printout, for the heatmap row order and
+# for the row labels. Descending coverage puts the compounds worth acting on at
+# the top of the figure.
+compounds = pd.DataFrame({'compound': [rev_name_dict[i] for i in cov.index],
+                          'coverage': cov.values,
+                          'tier': tiers.astype(str).values},
+                         index=cov.index).sort_values('coverage', ascending=False)
+print(compounds.round(3).sort_values('coverage').to_string(index=False))
+counts = compounds.tier.value_counts().to_dict()
 print('\ntier counts: %s' % counts)
-if counts.get('outside', 0) >= 0.5 * len(tbl):
+if counts.get('outside', 0) >= 0.5 * len(compounds):
     print('NOTE: at least half the query set sits outside the applicability '
           'domain. That is the headline result, and it is a statement about '
           'the reference database rather than about the model. Expanding the '
@@ -154,8 +183,10 @@ if len(check) and check.association.nunique() > 1:
     lo, hi = wilson(tp, called)
     print('%d compounds, %d pairs, %d positives (base rate %.3f)'
           % (check.ligand.nunique(), len(check), int(y.sum()), y.mean()))
-    print('AP %.3f | training holdout AP %.3f | receptor prior AP %.3f'
-          % (average_precision_score(y, s), calib['train_holdout_AP'],
+    # Compare against the human only holdout figure. The mixed one in the
+    # artefact includes murine receptors, which are never scored here.
+    print('AP %.3f | training holdout AP %.3f (human receptors) | receptor prior AP %.3f'
+          % (average_precision_score(y, s), calib['train_holdout_AP_human'],
              average_precision_score(y, check.Rec_prior)))
     print('%d calls, precision %.2f (95%% CI %.2f to %.2f), recall %.2f'
           % (called, precision_score(y, yh, zero_division=0), lo, hi,
@@ -175,10 +206,10 @@ if marginal:
     print('\n' + '=' * 74)
     print('6. nearest neighbours for marginal compounds')
     print('=' * 74)
-    S_lin = sim_dict['Lig_linear_sim'][0]
+    S_lin = sim_dict['Lig_linear_sim']
     for lid in marginal:
         top = results[results.ligand == lid].nlargest(2, 'score')
-        print('\n%s (coverage %.3f)' % (rev_name_dict.get(lid, lid), cov[lid]))
+        print('\n%s (coverage %.3f)' % (rev_name_dict[lid], cov[lid]))
         for _, r in top.iterrows():
             nn = nearest_neighbours(lid, S_lin, A, int(r.receptor), top_k=3,
                                     name_map=rev_name_dict)
@@ -197,55 +228,77 @@ print('=' * 74)
 out = results[['ligand', 'receptor', 'association', 'score', 'reported_score',
                'pred', 'lift', 'Rec_prior', 'coverage', 'tier',
                'rank_in_compound', 'recommendation']].copy()
-out['compound'] = out.ligand.map(lambda v: rev_name_dict.get(v, v))
+out['compound'] = out.ligand.map(rev_name_dict)
 csv_path = os.path.join(cfg.OUT_DIR, '%s_predictions.csv' % cfg.QUERY_NAME)
 out.to_csv(csv_path, index=False)
 print('table view -> %s' % csv_path)
 
-# Two panels. The left one is the quantity for deciding what to test. The right
-# one isolates what the chemistry contributed once the receptor base rate is
-# taken out. Circulating either alone invites a misreading.
-panel_a = out.pivot(index='compound', columns='receptor', values='score')
-panel_b = out.pivot(index='compound', columns='receptor', values='lift')
-order = cov.sort_values(ascending=False).index.map(lambda v: rev_name_dict.get(v, v))
-panel_a, panel_b = panel_a.reindex(order), panel_b.reindex(order)
-tier_of = {rev_name_dict.get(i, i): str(tiers[i]) for i in cov.index}
-ylabels = ['%s  [%s]' % (n, tier_of[n]) for n in panel_a.index]
+# Receptor ids carry no relation to the TAS2R numbering, so the axis is renamed
+# from an explicit mapping. Anything the mapping does not cover keeps its id and
+# is named below, because its predictions still belong on the figure.
+receptors = sorted(out.receptor.unique())
+unmapped = [c for c in receptors if c not in cfg.RECEPTOR_LABELS]
+if cfg.RECEPTOR_LABELS and unmapped:
+    print('%d receptors have no RECEPTOR_LABELS entry and keep their raw id: %s'
+          % (len(unmapped), unmapped))
+display = {c: cfg.RECEPTOR_LABELS.get(c, str(c)) for c in receptors}
+if len(set(display.values())) != len(display):
+    raise ValueError('RECEPTOR_LABELS maps two receptors onto the same name, '
+                     'which would merge their columns: %s' % display)
 
-INK, MUTED, SURFACE = '#1f2328', '#6b7280', '#ffffff'
+# The internal panel decides the column order. Entries with nothing behind them
+# become empty columns and render grey, so a receptor the model never covered
+# reads as absent rather than as a receptor nobody thought to include. With no
+# panel configured this leaves the scored receptors in their own order.
+scored = [display[c] for c in receptors]
+column_order = list(cfg.RECEPTOR_PANEL) + [c for c in scored
+                                           if c not in cfg.RECEPTOR_PANEL]
+not_scored = [c for c in column_order if c not in scored]
+if not_scored:
+    print('%d panel receptors carry no prediction and are drawn grey: %s'
+          % (len(not_scored), not_scored))
+
+# Two figures rather than one. Each carries a line naming the other, because
+# the probability panel alone reads as a portrait of BitterDB screening history
+# and the lift panel alone hides that a weak signal on a promiscuous receptor
+# can still be the best experiment to run.
+def panel(value):
+    grid = out.pivot(index='compound', columns='receptor', values=value)
+    return grid.rename(columns=display).reindex(index=compounds.compound,
+                                                columns=column_order)
+
+
+panel_a, panel_b = panel('score'), panel('lift')
+ylabels = ['%s  [%s]' % (r.compound, r.tier) for r in compounds.itertuples()]
+xlabels = column_order
+
+INK, MUTED, SURFACE, ABSENT = '#1f2328', '#6b7280', '#ffffff', '#e3e5e8'
 n_rows, n_cols = panel_a.shape
 
 # Cell values are readable up to a few hundred cells and turn into noise beyond
 # that, so 'auto' keeps them while the grid stays legible. Set ANNOTATE_CELLS
 # to True or False in the config to override.
-annotate = getattr(cfg, 'ANNOTATE_CELLS', 'auto')
+annotate = cfg.ANNOTATE_CELLS
 if annotate == 'auto':
     annotate = n_rows * n_cols <= 700
 
-panel_w = max(6.0, 0.34 * n_cols + 2.6)
-fig_w = 2 * panel_w + 1.4
-h = max(3.4, 0.34 * n_rows + 2.0)
-fig, axes = plt.subplots(1, 2, figsize=(fig_w, h), constrained_layout=True)
+fig_w = max(6.5, 0.42 * n_cols + 3.4)
+fig_h = max(3.6, 0.34 * n_rows + 2.4)
+cell_pt = (fig_w * 0.72 / n_cols) * 72
+fontsize = float(np.clip(cell_pt / 3.4, 3.6, 8.5))
 
-# Roughly how many points of width each cell gets, which sets the label size.
-cell_pt = (panel_w * 0.80 / max(n_cols, 1)) * 72
-fontsize = float(np.clip(cell_pt / 3.4, 3.6, 8.0))
 
-lim = float(np.nanmax(np.abs(panel_b.values))) or 1.0
-specs = [(panel_a, 'Blues', dict(vmin=0, vmax=1), lambda v: ('%.2f' % v).lstrip('0'),
-          'Calibrated probability', 'what to prioritise for testing'),
-         (panel_b, 'RdBu_r', dict(vmin=-lim, vmax=lim),
-          lambda v: '0.0' if abs(v) < 0.05 else '%+.1f' % v,
-          'Evidence beyond the receptor prior', 'what is unusual about this molecule')]
-
-for ax, (panel, cmap, norm, fmt, title, sub) in zip(axes, specs):
-    im = ax.imshow(panel.values, aspect='auto', cmap=cmap, **norm)
-    ax.set_title('%s\n%s' % (title, sub), fontsize=10, color=INK, pad=8, loc='left')
+def draw(panel, cmap, norm, fmt, title, subtitle, suffix):
+    fig, ax = plt.subplots(figsize=(fig_w, fig_h), constrained_layout=True)
+    shades = plt.get_cmap(cmap).copy()
+    shades.set_bad(ABSENT)          # empty panel columns, not a value of zero
+    im = ax.imshow(panel.values, aspect='auto', cmap=shades, **norm)
+    ax.set_title('%s\n%s' % (title, subtitle), fontsize=11, color=INK, pad=8, loc='left')
     ax.set_xticks(range(n_cols))
-    ax.set_xticklabels(panel.columns, rotation=90, fontsize=7, color=MUTED)
-    ax.set_xlabel('TAS2R', fontsize=8, color=MUTED, labelpad=4)
+    ax.set_xticklabels(xlabels, rotation=90, fontsize=7.5, color=MUTED)
+    ax.set_xlabel('receptor', fontsize=8, color=MUTED, labelpad=4)
     ax.set_yticks(range(n_rows))
-    ax.set_yticklabels(ylabels, fontsize=7, color=MUTED)
+    ax.set_yticklabels(ylabels, fontsize=7.5, color=MUTED)
     # A surface gap between cells rather than a border drawn around them.
     ax.set_xticks(np.arange(-.5, n_cols, 1), minor=True)
     ax.set_yticks(np.arange(-.5, n_rows, 1), minor=True)
@@ -270,13 +323,29 @@ for ax, (panel, cmap, norm, fmt, title, sub) in zip(axes, specs):
     cb.ax.tick_params(labelsize=7, length=0, colors=MUTED)
     cb.outline.set_visible(False)
 
-fig.suptitle('%s  |  threshold %.3f calibrated for ~%.0f%% precision  |  '
-             'tiers from the training holdout'
-             % (cfg.QUERY_NAME, t, 100 * calib['target_precision']),
-             fontsize=9, color=MUTED, y=1.02)
-png_path = os.path.join(cfg.OUT_DIR, '%s_heatmap.png' % cfg.QUERY_NAME)
-fig.savefig(png_path, dpi=170, bbox_inches='tight', facecolor='white')
-print('figure     -> %s' % png_path)
+    footnote = ('%s  |  threshold %.3f calibrated for ~%.0f%% precision  |  '
+                'tiers from the training holdout  |  read alongside %s'
+                % (cfg.QUERY_NAME, t, 100 * calib['target_precision'], suffix[1]))
+    if not_scored:
+        footnote += '  |  grey = receptor not covered by the model'
+    fig.supxlabel(footnote, fontsize=7.5, color=MUTED, ha='left', x=0.01)
+
+    path = os.path.join(cfg.OUT_DIR, '%s_heatmap_%s.png' % (cfg.QUERY_NAME, suffix[0]))
+    fig.savefig(path, dpi=170, bbox_inches='tight', facecolor='white')
+    plt.close(fig)
+    print('figure     -> %s' % path)
+
+
+draw(panel_a, 'Blues', dict(vmin=0, vmax=1),
+     lambda v: ('%.2f' % v).lstrip('0'),
+     'Calibrated probability', 'what to prioritise for testing',
+     ('probability', 'the lift figure'))
+
+lim = float(np.nanmax(np.abs(panel_b.values)))
+draw(panel_b, 'RdBu_r', dict(vmin=-lim, vmax=lim),
+     lambda v: '0.0' if abs(v) < 0.05 else '%+.1f' % v,
+     'Evidence beyond the receptor prior', 'what is unusual about this molecule',
+     ('lift', 'the probability figure'))
 
 print('\nProvenance line for any report these travel in:')
 print('  scores from the model calibrated on the training holdout at '

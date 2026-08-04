@@ -17,11 +17,10 @@ import os
 import pickle
 
 import numpy as np
-import pandas as pd
 from sklearn.metrics import average_precision_score, precision_score, recall_score
 
-from bittermatch_ext import (get_config, load_training_inputs, build_base,
-                             build_features, long_form, make_model,
+from bittermatch_ext import (get_config, model_kw, load_training_inputs,
+                             build_base, build_features, long_form, make_model,
                              oof_predictions, calibrate_threshold,
                              coverage_per_ligand, coverage_cutpoints,
                              validate_coverage_gate, wilson, ID_COLS)
@@ -29,7 +28,7 @@ from bittermatch_ext import (get_config, load_training_inputs, build_base,
 cfg = get_config()
 os.makedirs(cfg.MODEL_DIR, exist_ok=True)
 os.makedirs(cfg.OUT_DIR, exist_ok=True)
-MODEL_KW = dict(learning_rate=cfg.LEARNING_RATE, n_estimators=cfg.N_ESTIMATORS)
+MODEL_KW = model_kw(cfg)
 
 print('=' * 74)
 print('1. loading')
@@ -63,6 +62,14 @@ holdout_AP = float(average_precision_score(y, p))
 prior_AP = float(average_precision_score(y, te.Rec_prior.values))
 print('holdout AP %.3f | receptor prior AP %.3f | base rate %.3f'
       % (holdout_AP, prior_AP, y.mean()))
+
+# Training keeps the murine receptors, following the published notebook, but
+# inference scores human receptors only. The mixed figure is therefore not the
+# right reference for a query set, so store the human subset separately.
+human = (te.receptor < 2000).values
+holdout_AP_human = float(average_precision_score(y[human], p[human]))
+print('holdout AP over human receptors only %.3f (%d of %d pairs) <- the figure '
+      'bm_predict.py compares against' % (holdout_AP_human, human.sum(), len(y)))
 print('score range [%.3f, %.3f]  (the published settings capped this near 0.65)'
       % (p.min(), p.max()))
 if holdout_AP <= prior_AP:
@@ -96,9 +103,7 @@ print('coverage over %d holdout compounds: min %.3f, median %.3f, max %.3f'
       % (len(cov), cov.min(), cov.median(), cov.max()))
 print('cut points: low %.3f, high %.3f' % (T_LOW, T_HIGH))
 
-scored = te[ID_COLS + ['Rec_prior']].copy()
-scored['score'] = p
-gate = validate_coverage_gate(scored, cov, T_LOW, T_HIGH)
+gate = validate_coverage_gate(te.assign(score=p), cov, T_LOW, T_HIGH)
 print('\n' + gate.round(3).to_string(index=False))
 
 ok = gate.AP.is_monotonic_increasing if len(gate) > 1 else False
@@ -124,6 +129,7 @@ calibration = {
     'calibration': info,
     'coverage_cutpoints': {'low': T_LOW, 'high': T_HIGH},
     'train_holdout_AP': holdout_AP,
+    'train_holdout_AP_human': holdout_AP_human,
     'train_prior_AP': prior_AP,
     'train_base_rate': float(y.mean()),
     'gate_validated': bool(ok),

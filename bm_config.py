@@ -77,3 +77,29 @@ COVERAGE_Q_HIGH = 0.60
 #   True    always, useful when you intend to read exact values off the figure
 #   False   never, the CSV remains the place to read exact values
 ANNOTATE_CELLS = 'auto'
+
+# --------------------------------------------------------------------------
+# Heatmap receptor axis.
+#
+# RECEPTOR_LABELS maps the receptor id as it appears in the association matrix
+# to the name the axis should show. The ids do not follow the TAS2R numbering,
+# so write the mapping out rather than deriving it:
+#
+#     RECEPTOR_LABELS = {1: "hT2R1", 4: "hT2R4", 54: "hT2R39", 75: "hT2R46", ...}
+#
+# A receptor with no entry keeps its raw id and is named at run time. That is
+# the right outcome for the few receptors your internal naming does not cover,
+# since their predictions still belong on the figure.
+#
+# RECEPTOR_PANEL is the full internal panel, in the column order you want. Any
+# entry with no prediction behind it is drawn as an empty grey column, so a
+# receptor the model never covered is visibly absent rather than quietly
+# missing. Receptors that carry predictions but are not listed here are
+# appended on the right, so nothing is dropped either way.
+#
+#     RECEPTOR_PANEL = list(receptor_map.keys())
+#
+# Leave both empty to label the axis with raw ids and show only what was scored.
+# --------------------------------------------------------------------------
+RECEPTOR_LABELS = {}
+RECEPTOR_PANEL = []

@@ -30,8 +30,8 @@ import os
 
 import numpy as np
 
-from bittermatch_ext import (get_config, load_training_inputs, build_base,
-                             long_form, repeated_evaluation, summarise)
+from bittermatch_ext import (get_config, model_kw, load_training_inputs,
+                             build_base, long_form, repeated_evaluation, summarise)
 
 cfg = get_config()
 os.makedirs(cfg.OUT_DIR, exist_ok=True)
@@ -57,8 +57,7 @@ res = repeated_evaluation(A, base, long_A, sim_dict,
                           train_frac=cfg.TRAIN_FRACTION,
                           target_precision=cfg.TARGET_PRECISION,
                           n_folds=cfg.N_CALIB_FOLDS,
-                          model_kw=dict(learning_rate=cfg.LEARNING_RATE,
-                                        n_estimators=cfg.N_ESTIMATORS))
+                          model_kw=model_kw(cfg))
 
 suffix = '_permuted' if PERMUTE else ''
 res.to_csv(os.path.join(cfg.OUT_DIR, 'repeated_evaluation%s.csv' % suffix), index=False)

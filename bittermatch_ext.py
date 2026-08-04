@@ -25,16 +25,43 @@ from preprocessing import load_A, load_X_Lig, load_X_Rec, read_ligand_similarity
 ID_COLS = ['ligand', 'receptor', 'association']
 
 
-def get_config():
+# Settings every entry point needs, and the extra ones bm_predict.py needs.
+# Checked when the config is imported so that a config copied from an older
+# revision fails immediately rather than part way through a run.
+BASE_CONFIG = ('MODEL_DIR', 'OUT_DIR', 'A_CSV', 'REC_FEAT_CSV', 'LIG_FEAT_CSV',
+               'LIG_LINEAR_SIM_CSV', 'LIG_MOL2D_SIM_CSV', 'SEED',
+               'TARGET_PRECISION', 'LEARNING_RATE', 'N_ESTIMATORS',
+               'TRAIN_FRACTION', 'N_CALIB_FOLDS', 'N_REPEATS',
+               'COVERAGE_Q_LOW', 'COVERAGE_Q_HIGH')
+
+PREDICT_CONFIG = ('QUERY_NAME', 'QUERY_LIG_FEAT_CSV', 'QUERY_ASSOC_CSV',
+                  'QUERY_LINEAR_SIM_CSV', 'QUERY_MOL2D_SIM_CSV',
+                  'QUERY_ID_OFFSET', 'ANNOTATE_CELLS', 'RECEPTOR_LABELS',
+                  'RECEPTOR_PANEL')
+
+
+def get_config(extra=()):
     """Import the config module named by BM_CONFIG, defaulting to bm_config."""
-    return importlib.import_module(os.environ.get('BM_CONFIG', 'bm_config'))
+    cfg = importlib.import_module(os.environ.get('BM_CONFIG', 'bm_config'))
+    missing = [k for k in BASE_CONFIG + tuple(extra) if not hasattr(cfg, k)]
+    if missing:
+        raise AttributeError('%s is missing %d setting(s): %s. Copy them from '
+                             'bm_config.py.' % (cfg.__name__, len(missing), missing))
+    return cfg
+
+
+def model_kw(cfg):
+    """The hyperparameters both entry points hand to make_model."""
+    return dict(learning_rate=cfg.LEARNING_RATE, n_estimators=cfg.N_ESTIMATORS)
 
 
 # --------------------------------------------------------------------------
 # Items 3 and 4: neighbour informed features
 # --------------------------------------------------------------------------
-def sim_metrics(S, A, axis, normalise=True):
-    """Neighbour informed features, with two corrections.
+def sim_metrics(S, A):
+    """Neighbour informed features from a ligand to ligand similarity matrix.
+
+    Two corrections against the published version.
 
     W is an average rather than a sum. Paper equations 5 and 7 specify sums,
     which makes the feature proportional to how many ligands a receptor has on
@@ -43,21 +70,15 @@ def sim_metrics(S, A, axis, normalise=True):
 
     Column labels match the arrays they hold. The published version assembled
     W1, W0, M1, M0 and then labelled them W0, W1, M1, M0.
+
+    The receptor axis of the original function is not reproduced here, since the
+    new ligands scenario never uses it. similarity.py still carries the general
+    version unchanged if the filling the gaps scenario needs it.
     """
-    if axis == 'row' or axis == 0:
-        rows = A.index.intersection(S.index)
-        cols = A.columns
-        A_vals = A.loc[rows, :].values.copy()
-        S_vals = S.loc[rows, rows].values.copy()
-        transpose = False
-    elif axis == 'col' or axis == 1:
-        rows = A.index
-        cols = A.columns.intersection(S.index)
-        A_vals = A.loc[:, cols].values.copy().T
-        S_vals = S.loc[cols, cols].values.copy()
-        transpose = True
-    else:
-        raise ValueError('axis must be either "row" or 0, or "col" or 1.')
+    rows = A.index.intersection(S.index)
+    cols = A.columns
+    A_vals = A.loc[rows, :].values.copy()
+    S_vals = S.loc[rows, rows].values.copy()
 
     np.fill_diagonal(S_vals, 0)
 
@@ -72,29 +93,18 @@ def sim_metrics(S, A, axis, normalise=True):
 
     W1, W0 = S_vals.dot(pos), S_vals.dot(neg)
     n1, n0 = ones.dot(pos), ones.dot(neg)
+    mW1, mW0 = W1 / np.maximum(n1, 1), W0 / np.maximum(n0, 1)
 
     M01 = np.array([(np.max(S_vals * (line == 0), axis=1),
                      np.max(S_vals * (line == 1), axis=1)) for line in A_vals.T]).T
-
-    if transpose:
-        W1, W0, n1, n0, M01 = W1.T, W0.T, n1.T, n0.T, M01.T
     M1, M0 = M01[:, 1, :], M01[:, 0, :]
 
-    if normalise:
-        mW1 = W1 / np.maximum(n1, 1)
-        mW0 = W0 / np.maximum(n0, 1)
-        vals = np.vstack([mW1.flatten(), mW0.flatten(), (mW1 - mW0).flatten(),
-                          M1.flatten(), M0.flatten(), (M1 - M0).flatten()]).T
-        names = ['W1', 'W0', 'dW', 'M1', 'M0', 'dM']
-    else:
-        vals = np.vstack([W1.flatten(), W0.flatten(),
-                          M1.flatten(), M0.flatten()]).T
-        names = ['W1', 'W0', 'M1', 'M0']
-
+    vals = np.vstack([mW1.flatten(), mW0.flatten(), (mW1 - mW0).flatten(),
+                      M1.flatten(), M0.flatten(), (M1 - M0).flatten()]).T
     return pd.DataFrame(
         vals,
         index=pd.MultiIndex.from_product([rows, cols], names=['ligand', 'receptor']),
-        columns=names)
+        columns=['W1', 'W0', 'dW', 'M1', 'M0', 'dM'])
 
 
 def receptor_prior_features(masked_A):
@@ -141,7 +151,7 @@ def load_training_inputs(cfg):
     print('training inputs: A %s, %d receptors after removing %d orphans, '
           'X_Lig %s, X_Rec %s' % (A.shape, A.shape[1], len(orphans),
                                   X_Lig.shape, X_Rec.shape))
-    return A, X_Rec, X_Lig, {'Lig_linear_sim': (Ll, 0), 'Lig_mol2d_sim': (Lm, 0)}
+    return A, X_Rec, X_Lig, {'Lig_linear_sim': Ll, 'Lig_mol2d_sim': Lm}
 
 
 def load_query_inputs(cfg, A):
@@ -153,10 +163,7 @@ def load_query_inputs(cfg, A):
     q_X_Lig = load_X_Lig(cfg.QUERY_LIG_FEAT_CSV)
     query_names = list(q_X_Lig.cid.values)
 
-    assoc_path = getattr(cfg, 'QUERY_ASSOC_CSV', None)
-    if isinstance(assoc_path, str) and assoc_path.startswith('<'):
-        assoc_path = None
-
+    assoc_path = cfg.QUERY_ASSOC_CSV
     if assoc_path:
         q_A = load_A(assoc_path)
         unknown = [n for n in q_A.index if n not in query_names]
@@ -185,10 +192,7 @@ def load_query_inputs(cfg, A):
                       ('Lig_mol2d_sim', cfg.QUERY_MOL2D_SIM_CSV)]:
         df = pd.read_csv(path, sep=',')
         raw = df[df.columns[0]].values
-        ids = []
-        for v in raw:
-            key_v = v if v in name_dict else str(v)
-            ids.append(int(name_dict[key_v]) if key_v in name_dict else int(v))
+        ids = [name_dict[v] if v in name_dict else int(v) for v in raw]
         df = df.drop(columns=df.columns[0])
         df.index = np.array(ids, dtype='int64')
         df.columns = np.array(ids, dtype='int64')
@@ -233,9 +237,8 @@ def build_features(A, base, long_A, sim_dict, mask_ligands, keep_unknown=False):
     masked_A.loc[masked_A.index.isin(mask_ligands), :] = np.nan
 
     f = base.copy()
-    for prefix, (S, axis) in sim_dict.items():
-        block = sim_metrics(S, masked_A, axis).rename(
-            columns=lambda c: '%s_%s' % (prefix, c))
+    for prefix, S in sim_dict.items():
+        block = sim_metrics(S, masked_A).rename(columns=lambda c: '%s_%s' % (prefix, c))
         f = f.merge(block, how='left', on=['ligand', 'receptor'])
     f = f.merge(receptor_prior_features(masked_A), how='left', on='receptor')
     f = f.merge(long_A, how='left', on=['ligand', 'receptor'])
@@ -378,10 +381,11 @@ def coverage_per_ligand(features_df, sim_prefixes=('Lig_linear_sim', 'Lig_mol2d_
     view to be recognised, and requiring agreement would discard compounds that
     a single fingerprint happens to describe well.
     """
-    cols = [c for c in ('%s_M1' % p for p in sim_prefixes) if c in features_df.columns]
-    if not cols:
-        raise KeyError('no M1 columns found among %s'
-                       % [c for c in features_df.columns if c.endswith('M1')])
+    cols = ['%s_M1' % p for p in sim_prefixes]
+    missing = [c for c in cols if c not in features_df.columns]
+    if missing:
+        raise KeyError('missing %s, so coverage would rest on fewer similarity '
+                       'views than intended' % missing)
     return features_df.groupby('ligand')[cols].max().max(axis=1).rename('coverage')
 
 
@@ -420,16 +424,13 @@ def validate_coverage_gate(results_df, coverage, t_low, t_high):
                      'coverage_min': round(g.coverage.min(), 3),
                      'coverage_max': round(g.coverage.max(), 3),
                      'AP': average_precision_score(g.association, g.score),
-                     'prior_AP': (average_precision_score(g.association, g.Rec_prior)
-                                  if 'Rec_prior' in g else np.nan),
+                     'prior_AP': average_precision_score(g.association, g.Rec_prior),
                      'within_ligand_AP': np.mean(per_lig) if per_lig else np.nan})
     return pd.DataFrame(rows)
 
 
 def nearest_neighbours(ligand_id, S, A, receptor, top_k=5, name_map=None):
     """Which known compounds drove this call. Required output for marginal tier."""
-    if ligand_id not in S.index:
-        return pd.DataFrame(columns=['neighbour', 'similarity', 'association'])
     sims = S.loc[ligand_id].drop(index=ligand_id, errors='ignore')
     known = A[receptor].dropna()
     sims = sims[sims.index.isin(known.index)].sort_values(ascending=False).head(top_k)
@@ -438,6 +439,71 @@ def nearest_neighbours(ligand_id, S, A, receptor, top_k=5, name_map=None):
     if name_map:
         out['neighbour'] = out.neighbour.map(lambda v: name_map.get(v, v))
     return out
+
+
+# --------------------------------------------------------------------------
+# Duplicate and leakage screening
+# --------------------------------------------------------------------------
+def inchikeys(smiles_map):
+    """InChIKey per structure, as (skeleton block, full key).
+
+    The skeleton block is the first 14 characters, a hash of connectivity
+    alone. Stereochemistry sits in the second block and protonation state in
+    the final character, so the neutral acid and its carboxylate share a
+    skeleton. A quarter of the BitterDB SMILES carry an explicit charge, having
+    been prepared at pH 7, so matching on full keys against neutral structures
+    from an internal database would miss real duplicates.
+
+    RDKit is imported here rather than at module scope so that bm_train.py
+    runs without it. An unparsable SMILES raises: MolFromSmiles returns None
+    instead of raising, and a compound dropped from a duplicate screen without
+    anyone noticing is the failure this whole check exists to prevent.
+    """
+    from rdkit import Chem, RDLogger
+    RDLogger.DisableLog('rdApp.*')
+
+    keys, unparsable, multicomponent = {}, [], []
+    for name, smi in smiles_map.items():
+        mol = Chem.MolFromSmiles(smi)
+        if mol is None:
+            unparsable.append(name)
+            continue
+        if '.' in smi:
+            multicomponent.append(name)
+        key = Chem.MolToInchiKey(mol)
+        keys[name] = (key.split('-')[0], key)
+
+    if unparsable:
+        raise ValueError('RDKit could not parse %d SMILES, so these compounds '
+                         'would be skipped silently: %s' % (len(unparsable), unparsable))
+    return keys, multicomponent
+
+
+def duplicate_report(query_smiles, train_smiles):
+    """Which query compounds are already present in the training set.
+
+    Both arguments map an identifier to a SMILES string. Matching is on the
+    InChIKey skeleton, and the full keys are reported alongside so a chemist can
+    see whether a hit is literally the same molecule or the same skeleton in a
+    different stereochemical or protonation form.
+    """
+    q, q_multi = inchikeys(query_smiles)
+    t, t_multi = inchikeys(train_smiles)
+
+    index = {}
+    for name, (skeleton, full) in t.items():
+        index.setdefault(skeleton, []).append((name, full))
+
+    rows = []
+    for name, (skeleton, full) in q.items():
+        for hit_name, hit_full in index.get(skeleton, []):
+            rows.append({'query': name, 'training_match': hit_name,
+                         'identical': full == hit_full,
+                         'query_inchikey': full, 'match_inchikey': hit_full})
+    report = pd.DataFrame(rows, columns=['query', 'training_match', 'identical',
+                                         'query_inchikey', 'match_inchikey'])
+    return report, {'n_query': len(q), 'n_flagged': report['query'].nunique(),
+                    'multicomponent': q_multi + t_multi}
 
 
 def lift_over_prior(score, prior, eps=1e-6):
